@@ -286,7 +286,7 @@ def run_experiment(seed=42, n_trials=N_TRIALS, save_dir=None):
 
     print("\n" + "=" * 60)
     print("Summary Metrics:")
-    print(f"{'Cond':>6} {'Violations':>12} {'Success':>10} {'Mean γ':>10}")
+    print(f"{'Cond':>6} {'Violations':>12} {'Success':>10} {'Mean_gam':>10}")
     print("-" * 40)
     for cond in CONDITIONS:
         m = metrics[cond]

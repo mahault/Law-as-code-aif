@@ -21,7 +21,7 @@ from src.experiments.exp3_emergency import run_experiment as run_exp3
 from src.experiments.exp4_traceability import run_experiment as run_exp4
 from src.plotting.figures import (
     plot_fig1_minimization, plot_fig2_geofence,
-    plot_fig3_emergency, plot_fig4_traceability,
+    plot_fig3_emergency, plot_fig4_summary, plot_fig5_overhead,
 )
 
 
@@ -63,8 +63,7 @@ def main():
     print(f"  Completed in {time.time() - t0:.1f}s")
 
     # ── Experiment 4: Traceability Overhead ──
-    n4 = 20 if quick else 1000
-    print(f"\n[4/4] Running Experiment 4: Traceability Overhead (n={n4})...")
+    print(f"\n[4/4] Running Experiment 4: Traceability Overhead...")
     t0 = time.time()
     exp4_results = run_exp4(save_dir=results_dir)
     print(f"  Completed in {time.time() - t0:.1f}s")
@@ -76,22 +75,27 @@ def main():
 
     fig1 = plot_fig1_minimization(
         exp1_results,
-        save_path=results_dir / "fig1_minimization.pdf"
+        save_path=results_dir / "fig1_minimization.pdf",
     )
 
     fig2 = plot_fig2_geofence(
         exp2_results,
-        save_path=results_dir / "fig2_geofence.pdf"
+        save_path=results_dir / "fig2_geofence.pdf",
     )
 
-    fig3s = plot_fig3_emergency(
+    fig3 = plot_fig3_emergency(
         exp3_results,
-        save_path_prefix=str(results_dir / "fig")
+        save_path=results_dir / "fig3_emergency.pdf",
     )
 
-    fig4 = plot_fig4_traceability(
+    fig4 = plot_fig4_summary(
+        exp3_results,
+        save_path=results_dir / "fig4_summary.pdf",
+    )
+
+    fig5 = plot_fig5_overhead(
         exp4_results,
-        save_path=results_dir / "fig4_traceability.pdf"
+        save_path=results_dir / "fig5_overhead.pdf",
     )
 
     total_time = time.time() - total_start

@@ -6,6 +6,9 @@
 \usepackage{hyperref}
 \usepackage{booktabs}
 \usepackage{graphicx}
+\usepackage{float}
+\usepackage{placeins}
+\graphicspath{{figures/}}
 
 \title{\LARGE \textbf{Law as Code in Autonomous Drone Perception:\\ Active Inference for Context-Dependent Legal Compliance}}
 \author{Mahault Albarracin \and Nico Eigen}
@@ -95,9 +98,9 @@ Three state factors encode pipeline mode (RAW or ANONYMIZED, controllable), scen
 
 We ran 100 trials of 20 timesteps across four bystander densities $\{0, 2, 5, 10\}$ under three conditions: baseline (always RAW), rule-based LAL (always ANONYMIZED), and AIF-LAL (agent selects pipeline mode via EFE minimization). Figure~\ref{fig:minimization} presents the results. The AIF-LAL agent achieves near-zero biometric exposure across all densities while maintaining tracking accuracy above 80\%. The baseline exposes bystander biometrics at rates proportional to scene density. The rule-based LAL eliminates exposure entirely but degrades tracking by 15--25\% at high densities, where indiscriminate anonymization occasionally obscures the target. The AIF agent learns to switch to anonymized mode only when bystanders are detected, preserving tracking when the target is alone.
 
-\begin{figure}[t]
+\begin{figure}[H]
 \centering
-\includegraphics[width=\columnwidth]{figures/fig1_minimization.pdf}
+\includegraphics[width=\columnwidth]{fig1_minimization.pdf}
 \caption{Biometric exposure ratio~(a) and tracking accuracy~(b) across three conditions and four bystander densities. AIF-LAL achieves near-zero exposure without the tracking degradation caused by blanket anonymization. Error bars: $\pm 1$ s.d.\ across 100 trials.}
 \label{fig:minimization}
 \end{figure}
@@ -109,9 +112,9 @@ Three state factors encode drone zone (SAFE, BOUNDARY, RESTRICTED, or EMERGENCY,
 
 We ran 50 trials of 30 timesteps in which the target progressively walks toward restricted airspace and airspace status transitions from OPEN to RESTRICTED at $t = 15$. Figure~\ref{fig:geofence} shows the temporal evolution under three conditions. The PID-only controller follows the target into restricted airspace, accumulating violations after $t = 20$. The rule-based controller maintains zero violations but immediately loses the target at the boundary. The AIF-LAL agent infers the airspace context and dynamically shifts its preferences: it hovers at the boundary zone, maintaining partial tracking through lateral observation while accumulating zero violations.
 
-\begin{figure}[t]
+\begin{figure}[H]
 \centering
-\includegraphics[width=\columnwidth]{figures/fig2_geofence.pdf}
+\includegraphics[width=\columnwidth]{fig2_geofence.pdf}
 \caption{Geofence violation rate~(a) and tracking continuity~(b) over 30 timesteps. The shaded region marks restricted airspace activation. PID-only violates the geofence; rule-based preserves the boundary but loses the target; AIF-LAL maintains zero violations with partial tracking by adjusting its position preference.}
 \label{fig:geofence}
 \end{figure}
@@ -123,7 +126,7 @@ This experiment---the paper's centerpiece---directly ports the \texttt{DEM\_laws
 
 Context-dependent preferences implement the override mechanism. Under normal urgency, the position preference is $C_0 = [0, 0, 0, 0.1]$---a mild drive toward the target dominated by complaint aversion $C_3 = [4, -4]$. When the agent infers emergency ($q(\text{emergency}) > 0.5$), preferences shift to $C_0 = [0, 0, 0, 4.0]$, overwhelming the complaint signal. Seven conditions (Table~\ref{tab:conditions}) systematically vary privacy and urgency schedules across $T = 10$ timesteps with planning depth $N = 4$, each run for 50 trials.
 
-\begin{table}[t]
+\begin{table}[H]
 \centering
 \scriptsize
 \begin{tabular}{clll}
@@ -144,18 +147,20 @@ C7 & ACTIVE$\to$SUSP & NORM$\to$EMERG & Override before privacy lifts \\
 
 Figure~\ref{fig:emergency} shows behavioral trajectories for the three key conditions. Under C1 (normal urgency, active privacy), the agent approaches the privacy boundary but delays crossing, reflecting the tension between mild target preference and strong complaint aversion. Under C2 (emergency, active privacy), the amplified target drive overrides complaint aversion, producing traversal by $t = 3$. Under C7---the critical test---the agent waits at APPROACH during $t = 0$--$4$ (normal urgency, active privacy), then advances through the privacy zone after inferring emergency at $t \approx 5$, crossing despite active complaints. The belief trajectories confirm that the agent correctly tracks urgency and privacy context, and the precision trajectories indicate confident policy selection throughout. This behavior emerges from EFE minimization alone---emergency context \textit{overrides} privacy through preference re-weighting, not through explicit rule deletion.
 
-\begin{figure*}[t]
+\FloatBarrier
+\begin{figure*}[!htb]
 \centering
-\includegraphics[width=\textwidth]{figures/fig3_emergency.pdf}
+\includegraphics[width=\textwidth]{fig3_emergency.pdf}
 \caption{Emergency override trajectories for conditions C1 (normal urgency), C2 (emergency), and C7 (emergency onset before privacy suspension). Top row: drone position, with the privacy zone shaded in red. Middle row: inferred beliefs about emergency status (solid red) and privacy status (dashed green). In C7, vertical dotted lines mark emergency onset ($t = 4$) and privacy suspension ($t = 7$). Bottom row: policy precision ($1 = $ deterministic, $0 = $ uniform). The agent waits at APPROACH until emergency inference triggers advancement through the privacy zone.}
 \label{fig:emergency}
 \end{figure*}
+\FloatBarrier
 
 Figure~\ref{fig:summary} summarizes metrics across all seven conditions. Privacy violation rates are highest in emergency conditions (C2, C4, C6, C7)---precisely the conditions where crossing the privacy zone is legally justified. Mission success follows the complementary pattern: the agent reaches the target when either privacy is suspended or emergency context provides legal override.
 
-\begin{figure}[t]
+\begin{figure}[H]
 \centering
-\includegraphics[width=\columnwidth]{figures/fig4_summary.pdf}
+\includegraphics[width=\columnwidth]{fig4_summary.pdf}
 \caption{Summary across all seven conditions. (a)~Privacy violation rates are highest under emergency (red bars), where crossing is legally justified. (b)~Mission success confirms the agent reaches the target precisely when legal context permits. Purple: the critical C7 condition.}
 \label{fig:summary}
 \end{figure}
@@ -165,9 +170,9 @@ Figure~\ref{fig:summary} summarizes metrics across all seven conditions. Privacy
 
 The fourth experiment benchmarks real-time feasibility by measuring wall-clock time per decision cycle over 1000 post-warmup iterations for bare PID control, full AIF inference (state inference, policy evaluation, action sampling), and CIL logging. The complete LAL pipeline operates well within the 100\,ms drone control budget (Figure~\ref{fig:overhead}), with AIF inference as the dominant cost. Timings reflect scan-compiled JAX execution~\cite{heins2022}; Python-loop dispatch overhead, which is eliminated by standard JAX compilation, is excluded.
 
-\begin{figure}[t]
+\begin{figure}[H]
 \centering
-\includegraphics[width=\columnwidth]{figures/fig5_overhead.pdf}
+\includegraphics[width=\columnwidth]{fig5_overhead.pdf}
 \caption{Computational overhead per decision cycle. The total LAL pipeline (AIF inference + CIL logging) operates within the 100\,ms control budget required for real-time drone operation.}
 \label{fig:overhead}
 \end{figure}

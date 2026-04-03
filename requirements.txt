@@ -1,0 +1,7 @@
+inferactively-pymdp==1.0.0
+jax
+jaxlib
+numpy
+matplotlib
+seaborn
+pandas

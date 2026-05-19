@@ -1,0 +1,43 @@
+name: Quick experiment validation
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'requirements.txt'
+      - '.github/workflows/quick.yml'
+
+jobs:
+  quick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies (pin jax to known-good version)
+        run: |
+          python -m pip install --upgrade pip
+          pip install jax==0.4.35 jaxlib==0.4.35
+          pip install -r requirements.txt
+
+      - name: Show environment
+        run: |
+          python -c "import jax, pymdp, numpy; print('jax', jax.__version__); print('pymdp', pymdp.__version__); print('numpy', numpy.__version__)"
+
+      - name: Run --quick suite
+        run: python src/experiments/run_all.py --quick
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quick-results
+          path: results/
+          if-no-files-found: warn

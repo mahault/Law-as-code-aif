@@ -13,6 +13,9 @@ Observation modalities (4):
   M3: tracking_status [2] — LOCKED, LOST
 
 Actions for F0 (3): STAY=0, ADVANCE=1, RETREAT=2
+
+C Subtensors: 2 preference profiles indexed by airspace status,
+blended at runtime via belief-weighted mixing.
 """
 
 import jax.numpy as jnp
@@ -27,27 +30,33 @@ STAY = 0
 ADVANCE = 1
 RETREAT = 2
 
+# Airspace state indices
+OPEN = 0
+RESTRICTED = 1
 
-def build_A_matrices():
+
+def build_A_matrices(noise=0.05):
     """Build observation likelihoods.
 
     A[0]: gps_zone | drone_zone — shape (4, 4): near-identity
     A[1]: target_bearing | drone_zone, target_pos — shape (3, 4, 3)
     A[2]: geofence_alert | drone_zone, airspace — shape (2, 4, 2)
     A[3]: tracking_status | drone_zone, target_pos — shape (2, 4, 3)
+
+    Args:
+        noise: small noise for GPS localization (default 0.05)
     """
-    a = 0.05  # small noise
+    a = noise
 
     # M0: GPS zone — near-perfect localization
     n = 4
     A0 = (1.0 - a) * jnp.eye(n) + (a / (n - 1)) * (jnp.ones((n, n)) - jnp.eye(n))
 
     # M1: target_bearing — depends on relative position
-    # drone_zone vs target_position determines bearing
     A1 = jnp.zeros((3, 4, 3))
     for dz in range(4):
         for tp in range(3):
-            diff = tp - dz  # positive = target ahead, negative = behind
+            diff = tp - dz
             if diff > 0:
                 A1 = A1.at[:, dz, tp].set(jnp.array([0.8, 0.15, 0.05]))
             elif diff == 0:
@@ -57,13 +66,9 @@ def build_A_matrices():
 
     # M2: geofence_alert — WARNING when at BOUNDARY/RESTRICTED and airspace RESTRICTED
     A2 = jnp.zeros((2, 4, 2))
-    # SAFE zone: always CLEAR
     A2 = A2.at[:, 0, :].set(jnp.array([[0.95, 0.9], [0.05, 0.1]]))
-    # BOUNDARY: depends on airspace
     A2 = A2.at[:, 1, :].set(jnp.array([[0.7, 0.2], [0.3, 0.8]]))
-    # RESTRICTED: always WARNING
     A2 = A2.at[:, 2, :].set(jnp.array([[0.1, 0.05], [0.9, 0.95]]))
-    # EMERGENCY: always WARNING
     A2 = A2.at[:, 3, :].set(jnp.array([[0.05, 0.02], [0.95, 0.98]]))
 
     # M3: tracking_status — LOCKED when drone near target
@@ -72,11 +77,11 @@ def build_A_matrices():
         for tp in range(3):
             dist = abs(dz - tp)
             if dist == 0:
-                A3 = A3.at[:, dz, tp].set(jnp.array([0.9, 0.1]))   # LOCKED
+                A3 = A3.at[:, dz, tp].set(jnp.array([0.9, 0.1]))
             elif dist == 1:
-                A3 = A3.at[:, dz, tp].set(jnp.array([0.5, 0.5]))   # uncertain
+                A3 = A3.at[:, dz, tp].set(jnp.array([0.5, 0.5]))
             else:
-                A3 = A3.at[:, dz, tp].set(jnp.array([0.1, 0.9]))   # LOST
+                A3 = A3.at[:, dz, tp].set(jnp.array([0.1, 0.9]))
 
     return [A0, A1, A2, A3]
 
@@ -90,13 +95,10 @@ def build_B_matrices():
     """
     # B[0]: Drone zone transitions
     B0 = jnp.zeros((4, 4, 3))
-    # STAY: identity
     B0 = B0.at[:, :, 0].set(jnp.eye(4))
-    # ADVANCE: move one zone forward (cap at EMERGENCY_ZONE=3)
     for s in range(4):
         next_s = min(s + 1, 3)
         B0 = B0.at[next_s, s, 1].set(1.0)
-    # RETREAT: move one zone backward (cap at SAFE=0)
     for s in range(4):
         next_s = max(s - 1, 0)
         B0 = B0.at[next_s, s, 2].set(1.0)
@@ -106,35 +108,54 @@ def build_B_matrices():
         [0.5, 0.1, 0.0],
         [0.4, 0.5, 0.2],
         [0.1, 0.4, 0.8],
-    ])[..., None]  # (3, 3, 1)
+    ])[..., None]
 
     # B[2]: Airspace status — mostly stable
     B2 = jnp.array([
         [0.9, 0.1],
         [0.1, 0.9],
-    ])[..., None]  # (2, 2, 1)
+    ])[..., None]
 
     return [B0, B1, B2]
 
 
-def build_C_vectors(airspace="open"):
-    """Context-dependent preferences.
+def build_C_profiles():
+    """Build preference profiles indexed by airspace status.
 
-    OPEN: mild tracking preference dominates
-    RESTRICTED: strong geofence aversion dominates
+    Returns dict mapping (airspace_idx,) -> [C0, C1, C2, C3].
+
+    2 profiles:
+      OPEN:       tracking-dominant preferences
+      RESTRICTED: strong geofence aversion
     """
-    if airspace == "restricted":
-        # Strong aversion to restricted zones
-        C0 = jnp.array([2.0, 0.0, -4.0, -6.0])
-    else:
-        # Mild position preference (near target)
-        C0 = jnp.array([0.5, 1.0, -1.0, -3.0])
+    profiles = {}
 
-    C1 = jnp.array([1.0, 0.0, -1.0])   # prefer target ahead
-    C2 = jnp.array([1.0, -1.0])         # prefer clear alerts
-    C3 = jnp.array([2.0, -2.0])         # prefer locked tracking
+    # OPEN airspace: tracking dominates
+    profiles[(OPEN,)] = [
+        jnp.array([0.5, 1.0, -1.0, -3.0]),    # mild position preference
+        jnp.array([1.0, 0.0, -1.0]),            # prefer target ahead
+        jnp.array([1.0, -1.0]),                  # prefer clear alerts
+        jnp.array([2.0, -2.0]),                  # prefer locked tracking
+    ]
 
-    return [C0, C1, C2, C3]
+    # RESTRICTED airspace: geofence aversion dominates
+    profiles[(RESTRICTED,)] = [
+        jnp.array([2.0, 0.0, -4.0, -6.0]),     # strong aversion to restricted zones
+        jnp.array([1.0, 0.0, -1.0]),            # still prefer target ahead
+        jnp.array([1.0, -1.0]),                  # prefer clear alerts
+        jnp.array([2.0, -2.0]),                  # prefer locked tracking
+    ]
+
+    return profiles
+
+
+def build_C_vectors_default():
+    """Build default C vectors for agent initialization.
+
+    Returns the OPEN profile as a starting point.
+    """
+    profiles = build_C_profiles()
+    return profiles[(OPEN,)]
 
 
 def build_D_priors():
@@ -162,9 +183,9 @@ def build_target_schedule(T):
     schedule = []
     for t in range(T):
         if t < T // 3:
-            schedule.append(0)  # IN_SAFE
+            schedule.append(0)
         elif t < 2 * T // 3:
-            schedule.append(1)  # AT_BOUNDARY
+            schedule.append(1)
         else:
-            schedule.append(2)  # IN_RESTRICTED
+            schedule.append(2)
     return schedule

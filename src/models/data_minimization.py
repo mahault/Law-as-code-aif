@@ -12,6 +12,9 @@ Observation modalities (3):
   M2: consent_signal [2] — NO_CONSENT, CONSENT
 
 Actions for F0 (2): SET_RAW=0, SET_ANONYMIZED=1
+
+C Subtensors: 3 preference profiles indexed by scene composition,
+blended at runtime via belief-weighted mixing.
 """
 
 import jax.numpy as jnp
@@ -25,40 +28,43 @@ EXPOSURE = ["NONE", "PARTIAL", "FULL"]
 SET_RAW = 0
 SET_ANONYMIZED = 1
 
+# Scene state indices
+TARGET_ONLY = 0
+TARGET_BYSTANDERS = 1
+BYSTANDERS_ONLY = 2
 
-def build_A_matrices():
+
+def build_A_matrices(noise=0.3):
     """Build observation likelihood matrices.
 
     A[0]: data_exposure | pipeline_mode, scene — shape (3, 2, 3)
     A[1]: scene_cue | scene — shape (3, 3)
     A[2]: consent_signal | consent — shape (2, 2)
+
+    Args:
+        noise: ambiguity for scene_cue (default 0.3 for ~70% accuracy,
+               requiring genuine inference of scene composition)
     """
     # M0: data_exposure depends on pipeline AND scene
-    # RAW pipeline: exposure depends on scene composition
-    # ANONYMIZED pipeline: exposure is always NONE or PARTIAL
     A0 = jnp.zeros((3, 2, 3))
 
     # RAW pipeline (mode=0):
-    #   TARGET_ONLY: mostly PARTIAL (some target data)
     A0 = A0.at[:, 0, 0].set(jnp.array([0.1, 0.7, 0.2]))
-    #   TARGET+BYSTANDERS: FULL exposure (bystander biometrics transmitted)
     A0 = A0.at[:, 0, 1].set(jnp.array([0.0, 0.1, 0.9]))
-    #   BYSTANDERS_ONLY: FULL exposure
     A0 = A0.at[:, 0, 2].set(jnp.array([0.0, 0.05, 0.95]))
 
     # ANONYMIZED pipeline (mode=1):
-    #   TARGET_ONLY: NONE (no non-target data to leak)
     A0 = A0.at[:, 1, 0].set(jnp.array([0.85, 0.14, 0.01]))
-    #   TARGET+BYSTANDERS: PARTIAL (target tracked, bystanders blurred)
     A0 = A0.at[:, 1, 1].set(jnp.array([0.3, 0.65, 0.05]))
-    #   BYSTANDERS_ONLY: NONE (all faces blurred)
     A0 = A0.at[:, 1, 2].set(jnp.array([0.9, 0.09, 0.01]))
 
-    # M1: scene_cue — near-identity observation of scene
+    # M1: scene_cue — reduced accuracy so agent must infer under uncertainty
+    off_diag = noise / 2
+    on_diag = 1.0 - noise
     A1 = jnp.array([
-        [0.9, 0.05, 0.05],
-        [0.05, 0.9, 0.05],
-        [0.05, 0.05, 0.9],
+        [on_diag, off_diag, off_diag],
+        [off_diag, on_diag, off_diag],
+        [off_diag, off_diag, on_diag],
     ])
 
     # M2: consent_signal — clear observation of consent
@@ -87,28 +93,60 @@ def build_B_matrices():
         [0.6, 0.2, 0.1],
         [0.3, 0.6, 0.3],
         [0.1, 0.2, 0.6],
-    ])[..., None]  # (3, 3, 1)
+    ])[..., None]
 
     # B[2]: Consent is mostly stable
     B2 = jnp.array([
         [0.95, 0.05],
         [0.05, 0.95],
-    ])[..., None]  # (2, 2, 1)
+    ])[..., None]
 
     return [B0, B1, B2]
 
 
-def build_C_vectors():
-    """Preferences: minimize exposure while maintaining tracking.
+def build_C_profiles():
+    """Build preference profiles indexed by scene composition.
 
-    C[0]: Strong preference for NONE/PARTIAL exposure, aversion to FULL
-    C[1]: Mild preference for TARGET_ONLY (good tracking, no bystanders)
-    C[2]: No preference on consent signal
+    Returns dict mapping (scene_idx,) -> [C0, C1, C2].
+
+    3 profiles:
+      TARGET_ONLY:       prefer RAW pipeline, strong tracking preference
+      TARGET+BYSTANDERS: prefer ANONYMIZED, balance tracking and privacy
+      BYSTANDERS_ONLY:   strongly prefer ANONYMIZED, no tracking preference
     """
-    C0 = jnp.array([3.0, 1.0, -4.0])   # NONE > PARTIAL >> FULL
-    C1 = jnp.array([1.0, 0.5, -0.5])    # mild tracking preference
-    C2 = jnp.zeros(2)
-    return [C0, C1, C2]
+    profiles = {}
+
+    # TARGET_ONLY: RAW is fine, prioritize tracking
+    profiles[(TARGET_ONLY,)] = [
+        jnp.array([1.0, 1.5, -1.0]),     # mild exposure tolerance (target data ok)
+        jnp.array([1.5, 0.5, -0.5]),     # strong tracking preference
+        jnp.array([0.0, 0.0]),           # no consent preference
+    ]
+
+    # TARGET+BYSTANDERS: must anonymize, but still track
+    profiles[(TARGET_BYSTANDERS,)] = [
+        jnp.array([3.0, 0.5, -4.0]),     # strong aversion to FULL exposure
+        jnp.array([0.5, 0.5, -0.5]),     # mild tracking preference
+        jnp.array([0.0, 0.0]),
+    ]
+
+    # BYSTANDERS_ONLY: strongly anonymize, no tracking needed
+    profiles[(BYSTANDERS_ONLY,)] = [
+        jnp.array([4.0, 0.0, -5.0]),     # very strong aversion to exposure
+        jnp.array([0.0, 0.0, 0.0]),      # no tracking preference
+        jnp.array([0.0, 0.0]),
+    ]
+
+    return profiles
+
+
+def build_C_vectors_default():
+    """Build default C vectors for agent initialization.
+
+    Returns the TARGET+BYSTANDERS profile as a conservative starting point.
+    """
+    profiles = build_C_profiles()
+    return profiles[(TARGET_BYSTANDERS,)]
 
 
 def build_D_priors():
@@ -135,18 +173,13 @@ def build_scene_schedule(T, bystander_density):
 
     Higher density → more timesteps with bystanders present.
     """
-    import jax.random as jr
-
-    # Probability of bystanders present increases with density
     p_bystanders = min(bystander_density / 12.0, 0.9)
 
-    # Generate schedule: 0=TARGET_ONLY, 1=TARGET+BYSTANDERS, 2=BYSTANDERS_ONLY
     schedule = []
     for t in range(T):
         if bystander_density == 0:
-            schedule.append(0)  # always target only
+            schedule.append(0)
         else:
-            # Stochastic assignment based on density
             r = (t * 7 + bystander_density * 13) % 100 / 100.0
             if r < (1 - p_bystanders):
                 schedule.append(0)

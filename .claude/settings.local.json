@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c:*)",
+      "Bash(where:*)",
+      "Bash(python -X utf8 -c:*)",
+      "WebSearch",
+      "WebFetch(domain:www.refsmmat.com)",
+      "Bash(pip show:*)",
+      "WebFetch(domain:arxiv.org)"
+    ]
+  }
+}

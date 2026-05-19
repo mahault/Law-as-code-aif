@@ -4,6 +4,11 @@ Experiment 1: GDPR Data Minimization
 100 trials × 20 timesteps per condition.
 3 conditions: Baseline (always RAW), Rule-based (always ANONYMIZED), AIF-LAL.
 Vary bystander density: [0, 2, 5, 10].
+
+Uses belief-weighted preference profile mixing (C subtensors):
+the agent infers scene composition from noisy observations and blends
+preference profiles accordingly, choosing the appropriate pipeline mode
+under genuine uncertainty.
 """
 
 import sys
@@ -17,12 +22,15 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from pymdp.agent import Agent
+import equinox as eqx
 from src.models.data_minimization import (
-    build_A_matrices, build_B_matrices, build_C_vectors, build_D_priors,
+    build_A_matrices, build_B_matrices, build_C_profiles,
+    build_C_vectors_default, build_D_priors,
     get_A_dependencies, get_B_dependencies, build_scene_schedule,
     PIPELINE, SCENE, EXPOSURE,
 )
 from src.environments.drone_env import DroneEnv
+from src.utils.profile_mixing import compute_C_effective
 
 T = 20
 N_TRIALS = 100
@@ -36,12 +44,13 @@ def run_condition(condition, bystander_density, n_trials, seed=42):
     """
     A = build_A_matrices()
     B = build_B_matrices()
-    C = build_C_vectors()
     D = build_D_priors()
     A_deps = get_A_dependencies()
     B_deps = get_B_dependencies()
 
-    # For non-AIF conditions, we still simulate the env for metrics
+    # C profiles for belief-weighted mixing
+    profiles = build_C_profiles()
+
     exposure_counts = []
     tracking_counts = []
 
@@ -50,22 +59,24 @@ def run_condition(condition, bystander_density, n_trials, seed=42):
         rng = jr.PRNGKey(trial_seed)
 
         scene_schedule = build_scene_schedule(T, bystander_density)
-        consent_schedule = [0] * T  # no consent throughout
+        consent_schedule = [0] * T
 
+        rng, env_key = jr.split(rng)
         env = DroneEnv(
             A=A, B=B,
             schedules={1: scene_schedule, 2: consent_schedule},
             num_states=[2, 3, 2],
             control_fac_idx=[0],
         )
-        true_state = env.reset(D)
+        true_state = env.reset(D, rng_key=env_key)
         true_state[1] = scene_schedule[0]
         true_state[2] = consent_schedule[0]
 
-        # AIF agent (only used for aif_lal condition)
+        # AIF agent
         if condition == "aif_lal":
+            C_default = build_C_vectors_default()
             agent = Agent(
-                A=A, B=B, C=C, D=D,
+                A=A, B=B, C=C_default, D=D,
                 A_dependencies=A_deps,
                 B_dependencies=B_deps,
                 control_fac_idx=[0],
@@ -73,6 +84,8 @@ def run_condition(condition, bystander_density, n_trials, seed=42):
                 gamma=16.0,
                 action_selection="stochastic",
                 sampling_mode="marginal",
+                use_utility=True,
+                use_states_info_gain=True,
             )
             qs = [jnp.expand_dims(d, -2) for d in agent.D]
             action = -jnp.ones((1, 3), dtype=jnp.int32)
@@ -81,18 +94,28 @@ def run_condition(condition, bystander_density, n_trials, seed=42):
         n_tracked = 0
 
         for t in range(T):
-            rng, obs_key, act_key = jr.split(rng, 3)
+            rng, obs_key, act_key, step_key = jr.split(rng, 4)
 
             if condition == "baseline":
-                # Always RAW pipeline
                 pipeline_action = 0
             elif condition == "rule_based":
-                # Always ANONYMIZED pipeline
                 pipeline_action = 1
             else:
-                # AIF-LAL: agent decides
+                # AIF-LAL: agent decides with belief-weighted C mixing
                 obs_list = env.generate_observation(true_state, A_deps, obs_key)
                 obs_batch = [jnp.array([[int(o)]]) for o in obs_list]
+
+                # Extract scene belief for profile mixing
+                qs_latest = [q[:, -1, :] for q in qs]
+                q_scene = qs_latest[1][0]  # (3,)
+
+                # Belief-weighted C mixing
+                C_eff = compute_C_effective(
+                    profiles,
+                    {"scene": q_scene},
+                )
+                batched_C = [c[None, ...] for c in C_eff]
+                agent = eqx.tree_at(lambda a: a.C, agent, batched_C)
 
                 if jnp.any(action < 0):
                     emp_prior = agent.D
@@ -113,18 +136,17 @@ def run_condition(condition, bystander_density, n_trials, seed=42):
             scene = true_state[1]
             mode = true_state[0]
             exposure_probs = np.array(A[0][:, mode, scene])
-            # FULL exposure = index 2
             n_exposure += exposure_probs[2]
 
-            # Tracking accuracy: target present and pipeline works
-            if scene in [0, 1]:  # target visible
-                if mode == 0:  # RAW: perfect tracking
+            # Tracking accuracy
+            if scene in [0, 1]:
+                if mode == 0:
                     n_tracked += 1.0
-                else:  # ANONYMIZED: slightly degraded
+                else:
                     n_tracked += 0.85
 
             # Step env
-            next_state = env.step(true_state, [pipeline_action, 0, 0])
+            next_state = env.step(true_state, [pipeline_action, 0, 0], rng_key=step_key)
             true_state = next_state
 
         exposure_ratio = n_exposure / T

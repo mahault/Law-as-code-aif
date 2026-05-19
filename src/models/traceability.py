@@ -195,7 +195,9 @@ def run_benchmark(n_cycles=1000):
     # The model has 3 factors x [4,2,2] states x 16 policies = tiny FLOP count.
     # Projected scan time: ~1-5ms per step (based on pymdp benchmarks).
     aif_mean = float(np.mean(aif_times))
-    aif_projected = min(aif_mean, 5.0)  # Conservative scan estimate
+    # Report actual measured timing without artificial cap.
+    # jax.lax.scan would reduce per-step cost but we report raw measurements.
+    aif_projected = aif_mean
 
     results = {
         "pid_mean_ms": float(np.mean(pid_times)),

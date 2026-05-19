@@ -15,6 +15,9 @@ Observation modalities (4):
   M3: complaint_signal[2] — OFF, ON
 
 Actions for F0 (2): HOLD=0, ADVANCE=1
+
+C Subtensors: 4 preference profiles indexed by (urgency, privacy),
+blended at runtime via belief-weighted mixing.
 """
 
 import jax.numpy as jnp
@@ -29,42 +32,41 @@ URGENCY = ["NORMAL", "EMERGENCY"]
 HOLD = 0
 ADVANCE = 1
 
+# Context state indices
+NORMAL = 0
+EMERGENCY = 1
+ACTIVE = 0
+SUSPENDED = 1
 
-def build_A_matrices():
+
+def build_A_matrices(noise=0.125):
     """Build observation likelihood matrices A[m].
 
     Returns list of 4 arrays (no batch dimension — pymdp adds it).
 
     A[0]: position_obs | position        — shape (4, 4)
-    A[1]: privacy_cue  | position        — shape (2, 4)
+    A[1]: privacy_cue  | position, privacy — shape (2, 4, 2)
     A[2]: emergency_signal | urgency     — shape (2, 2)
     A[3]: complaint_signal | position, privacy — shape (2, 4, 2)
+
+    Args:
+        noise: ambiguity parameter (default 0.125 = 1/8, matching DEM_laws.m)
     """
-    a = 1.0 / 8  # ambiguity parameter (matching DEM_laws.m)
+    a = noise
 
     # M0: position_obs — 1-to-1 mapping (identity)
     A0 = jnp.eye(4)
 
-    # M1: privacy_cue — precise at APPROACH (1) and PRIVACY_ZONE (2),
-    #     ambiguous at PATROL (0) and TARGET (3)
-    # Columns = position states, rows = privacy_cue observations
-    A1 = jnp.array([
-        [0.5, 1 - a, 1 - a, 0.5],   # p(PRIVACY_ACTIVE | position)
-        [0.5,     a,     a, 0.5],    # p(PRIVACY_SUSPENDED | position)
-    ])
-    # NOTE: This gives the cue about the privacy boundary sign.
-    # The actual privacy context (F1) modulates what the sign SAYS.
-    # But in DEM_laws.m, the privacy cue depends on both position AND privacy.
-    # Let's make it depend on (position, privacy) to match:
+    # M1: privacy_cue depends on (position, privacy)
     # At positions 1,2: precise about privacy state
     # At positions 0,3: ambiguous
-    A1_full = jnp.zeros((2, 4, 2))  # (obs, position, privacy)
+    A1_full = jnp.zeros((2, 4, 2))
     # Position 0 (PATROL): ambiguous about privacy
     A1_full = A1_full.at[:, 0, 0].set(jnp.array([0.5, 0.5]))
     A1_full = A1_full.at[:, 0, 1].set(jnp.array([0.5, 0.5]))
     # Position 1 (APPROACH): precise about privacy
-    A1_full = A1_full.at[:, 1, 0].set(jnp.array([1 - a, a]))      # privacy=ACTIVE → cue=ACTIVE
-    A1_full = A1_full.at[:, 1, 1].set(jnp.array([a, 1 - a]))      # privacy=SUSPENDED → cue=SUSPENDED
+    A1_full = A1_full.at[:, 1, 0].set(jnp.array([1 - a, a]))
+    A1_full = A1_full.at[:, 1, 1].set(jnp.array([a, 1 - a]))
     # Position 2 (PRIVACY_ZONE): precise about privacy
     A1_full = A1_full.at[:, 2, 0].set(jnp.array([1 - a, a]))
     A1_full = A1_full.at[:, 2, 1].set(jnp.array([a, 1 - a]))
@@ -74,95 +76,142 @@ def build_A_matrices():
 
     # M2: emergency_signal — heard everywhere with slight ambiguity
     A2 = jnp.array([
-        [1 - a, a],      # p(OFF | NORMAL, EMERGENCY)
-        [a, 1 - a],      # p(ON  | NORMAL, EMERGENCY)
+        [1 - a, a],
+        [a, 1 - a],
     ])
 
     # M3: complaint_signal — ON when at PRIVACY_ZONE (pos=2) AND privacy=ACTIVE
-    # shape (2, 4, 2) — depends on position AND privacy
     A3 = jnp.zeros((2, 4, 2))
     for pos in range(4):
         for priv in range(2):
             if pos == 2 and priv == 0:  # PRIVACY_ZONE + ACTIVE
-                A3 = A3.at[0, pos, priv].set(a)       # p(OFF) = small
-                A3 = A3.at[1, pos, priv].set(1 - a)   # p(ON)  = large
+                A3 = A3.at[0, pos, priv].set(a)
+                A3 = A3.at[1, pos, priv].set(1 - a)
             else:
-                A3 = A3.at[0, pos, priv].set(1 - a)   # p(OFF) = large
-                A3 = A3.at[1, pos, priv].set(a)        # p(ON)  = small
+                A3 = A3.at[0, pos, priv].set(1 - a)
+                A3 = A3.at[1, pos, priv].set(a)
 
     return [A0, A1_full, A2, A3]
 
 
-def build_B_matrices():
+def build_B_matrices(a_priv=0.01, a_urg=0.02):
     """Build transition matrices B[f].
 
     B[0]: position — shape (4, 4, 2): HOLD=identity, ADVANCE=shift forward
     B[1]: privacy  — shape (2, 2, 1): slow switching (uncontrollable)
     B[2]: urgency  — shape (2, 2, 1): absorbing once emergency
-    """
-    a = 1.0 / 8
 
+    Args:
+        a_priv: privacy context transition rate. Low values (0.01) model
+            privacy zones as stable legal designations that rarely change.
+            Higher values make beliefs volatile and noise-sensitive.
+        a_urg: urgency context transition rate (NORMAL→EMERGENCY only).
+            Low values (0.02) model emergencies as rare events. Once in
+            EMERGENCY, the state is absorbing (cannot return to NORMAL).
+    """
     # B[0]: Position transitions
-    # HOLD (action=0): stay in place (identity)
     B0_hold = jnp.eye(4)
-    # ADVANCE (action=1): move forward one step, wrap TARGET→PRIVACY_ZONE
-    # PATROL→APPROACH, APPROACH→PRIVACY_ZONE, PRIVACY_ZONE→TARGET, TARGET→PRIVACY_ZONE
     B0_advance = jnp.zeros((4, 4))
     B0_advance = B0_advance.at[1, 0].set(1.0)  # PATROL → APPROACH
     B0_advance = B0_advance.at[2, 1].set(1.0)  # APPROACH → PRIVACY_ZONE
     B0_advance = B0_advance.at[3, 2].set(1.0)  # PRIVACY_ZONE → TARGET
     B0_advance = B0_advance.at[2, 3].set(1.0)  # TARGET → PRIVACY_ZONE (wrap back)
 
-    B0 = jnp.stack([B0_hold, B0_advance], axis=-1)  # (4, 4, 2)
+    B0 = jnp.stack([B0_hold, B0_advance], axis=-1)
 
-    # B[1]: Privacy context — slow switching, mostly stable
+    # B[1]: Privacy context — stable, rare switching
     B1 = jnp.array([
-        [1 - a, a],
-        [a, 1 - a],
-    ])[..., None]  # (2, 2, 1)
+        [1 - a_priv, a_priv],
+        [a_priv, 1 - a_priv],
+    ])[..., None]
 
     # B[2]: Urgency context — absorbing once emergency
-    # Normal can become emergency, but emergency stays emergency
     B2 = jnp.array([
-        [1 - a, 0],
-        [a, 1],
-    ])[..., None]  # (2, 2, 1)
+        [1 - a_urg, 0],
+        [a_urg, 1],
+    ])[..., None]
 
     return [B0, B1, B2]
 
 
-def build_C_vectors(urgency_state="normal"):
-    """Build preference vectors C[m] (log-preferences).
+def build_C_profiles():
+    """Build preference profiles indexed by (urgency, privacy).
 
-    Context-dependent via urgency:
-      NORMAL:    mild preference for TARGET
-      EMERGENCY: strong preference for TARGET
+    Returns dict mapping (urgency_idx, privacy_idx) -> [C0, C1, C2, C3].
 
-    C[3]: Always strong aversion to complaints.
+    4 profiles:
+      (NORMAL, ACTIVE):     weak target drive, strong complaint aversion
+      (NORMAL, SUSPENDED):  moderate target drive, mild complaint aversion
+      (EMERGENCY, ACTIVE):  strong target drive, reduced complaint aversion
+      (EMERGENCY, SUSPENDED): strong target drive, minimal complaint aversion
     """
-    if urgency_state == "emergency":
-        # Strong drive toward TARGET position (overrides complaint cost)
-        C0 = jnp.array([0.0, 0.0, 0.0, 4.0])
-    else:
-        # Mild drive toward TARGET (weaker than complaint cost)
-        C0 = jnp.array([0.0, 0.0, 0.0, 0.1])
+    profiles = {}
 
-    # No preference on privacy cue observation
-    C1 = jnp.zeros(2)
+    # Normal urgency, Active privacy
+    # C0: Strong privacy-zone aversion (-6.0) and negative target drive (-2.0)
+    # makes the agent prefer staying at APPROACH or PATROL rather than
+    # advancing through the privacy zone. Combined with strong complaint
+    # aversion (8.0), the agent avoids the privacy zone entirely.
+    # The position preferences encode: "under active privacy + normal urgency,
+    # do NOT advance past APPROACH."
+    profiles[(NORMAL, ACTIVE)] = [
+        jnp.array([0.0, 1.0, -6.0, -2.0]),    # prefer APPROACH, strong privacy-zone aversion
+        jnp.array([0.0, 0.0]),                  # no privacy-cue preference
+        jnp.array([0.0, 0.0]),                  # no emergency-signal preference
+        jnp.array([8.0, -8.0]),                 # very strong complaint aversion
+    ]
 
-    # Mild preference for no emergency signal
-    C2 = jnp.array([0.0, 0.0])
+    # Normal urgency, Suspended privacy
+    # With privacy suspended, the agent can freely advance to TARGET.
+    profiles[(NORMAL, SUSPENDED)] = [
+        jnp.array([0.0, 0.0, 0.0, 3.0]),      # strong target drive
+        jnp.array([0.0, 0.0]),
+        jnp.array([0.0, 0.0]),
+        jnp.array([0.5, -0.5]),                # mild complaint aversion
+    ]
 
-    # Strong aversion to complaints (dominates normal TARGET pref)
-    C3 = jnp.array([4.0, -4.0])
+    # Emergency, Active privacy
+    # Emergency overrides privacy: strong target drive (6.0) dominates
+    # even with some complaint aversion (1.0). The agent advances through
+    # the privacy zone because the emergency justifies the override.
+    profiles[(EMERGENCY, ACTIVE)] = [
+        jnp.array([0.0, 0.0, 0.0, 6.0]),      # very strong target drive
+        jnp.array([0.0, 0.0]),
+        jnp.array([0.0, 0.0]),
+        jnp.array([1.0, -1.0]),                # reduced complaint aversion
+    ]
 
-    return [C0, C1, C2, C3]
+    # Emergency, Suspended privacy
+    profiles[(EMERGENCY, SUSPENDED)] = [
+        jnp.array([0.0, 0.0, 0.0, 6.0]),      # very strong target drive
+        jnp.array([0.0, 0.0]),
+        jnp.array([0.0, 0.0]),
+        jnp.array([0.5, -0.5]),                # minimal complaint aversion
+    ]
+
+    return profiles
+
+
+def build_C_vectors_default():
+    """Build default C vectors for agent initialization.
+
+    Returns the normal-active profile as a reasonable starting point.
+    The actual effective C is computed via profile mixing at each timestep.
+    """
+    profiles = build_C_profiles()
+    return profiles[(NORMAL, ACTIVE)]
 
 
 def build_D_priors():
-    """Build initial state priors D[f]."""
+    """Build initial state priors D[f].
+
+    D1 uses a modest prior favouring active privacy [0.75, 0.25].
+    This reflects that privacy restrictions are the default in most
+    drone operating areas, making the agent appropriately cautious
+    before it gathers direct evidence about privacy status.
+    """
     D0 = jnp.array([1.0, 0.0, 0.0, 0.0])  # start at PATROL
-    D1 = jnp.array([0.5, 0.5])             # uncertain about privacy
+    D1 = jnp.array([0.75, 0.25])           # prior: privacy likely active
     D2 = jnp.array([7 / 8, 1 / 8])         # mostly expect normal
     return [D0, D1, D2]
 
@@ -196,8 +245,8 @@ def get_condition_schedule(condition_id, T=10):
       C6: ACTIVE→SUSPENDED at t=7, All EMERGENCY — Cross early
       C7: ACTIVE→SUSPENDED at t=7, NORMAL→EMERGENCY at t=4 — Key test
     """
-    switch_privacy = 7   # timestep where privacy switches (for C5-C7)
-    switch_urgency = 4   # timestep where urgency switches (for C7)
+    switch_privacy = 7
+    switch_urgency = 4
 
     if condition_id == 1:
         privacy = [0] * T

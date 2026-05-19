@@ -4,6 +4,10 @@ Experiment 2: EASA Geofence Compliance
 50 trials × 30 timesteps per condition.
 3 conditions: PID-only, Rule-based geofence, AIF-LAL.
 Target walks toward restricted zone.
+
+Uses belief-weighted preference profile mixing (C subtensors):
+under uncertainty about airspace status, C_eff blends tracking and
+geofence aversion — naturally conservative when uncertain.
 """
 
 import sys
@@ -19,11 +23,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from pymdp.agent import Agent
 from src.models.geofence import (
-    build_A_matrices, build_B_matrices, build_C_vectors, build_D_priors,
+    build_A_matrices, build_B_matrices, build_C_profiles,
+    build_C_vectors_default, build_D_priors,
     get_A_dependencies, get_B_dependencies, build_target_schedule,
     ZONES, TARGET_POS, STAY, ADVANCE, RETREAT,
 )
 from src.environments.drone_env import DroneEnv
+from src.utils.profile_mixing import compute_C_effective
 
 T = 30
 N_TRIALS = 50
@@ -39,12 +45,13 @@ def run_condition(condition, n_trials, seed=42):
     D = build_D_priors()
     A_deps = get_A_dependencies()
 
-    # Per-trial metrics
+    # C profiles for belief-weighted mixing
+    profiles = build_C_profiles()
+
     all_violations = []
     all_tracking = []
     all_abort = []
 
-    # Time-series for averaging
     violations_over_time = np.zeros(T)
     tracking_over_time = np.zeros(T)
 
@@ -53,23 +60,24 @@ def run_condition(condition, n_trials, seed=42):
         rng = jr.PRNGKey(trial_seed)
 
         target_schedule = build_target_schedule(T)
-        airspace_schedule = [0] * (T // 2) + [1] * (T - T // 2)  # OPEN then RESTRICTED
+        airspace_schedule = [0] * (T // 2) + [1] * (T - T // 2)
 
+        rng, env_key = jr.split(rng)
         env = DroneEnv(
             A=A, B=B,
             schedules={1: target_schedule, 2: airspace_schedule},
             num_states=[4, 3, 2],
             control_fac_idx=[0],
         )
-        true_state = env.reset(D)
+        true_state = env.reset(D, rng_key=env_key)
         true_state[1] = target_schedule[0]
         true_state[2] = airspace_schedule[0]
 
-        # AIF agent for aif_lal
+        # AIF agent
         if condition == "aif_lal":
-            C = build_C_vectors("open")
+            C_default = build_C_vectors_default()
             agent = Agent(
-                A=A, B=B, C=C, D=D,
+                A=A, B=B, C=C_default, D=D,
                 A_dependencies=A_deps,
                 B_dependencies=get_B_dependencies(),
                 control_fac_idx=[0],
@@ -77,6 +85,8 @@ def run_condition(condition, n_trials, seed=42):
                 gamma=16.0,
                 action_selection="stochastic",
                 sampling_mode="marginal",
+                use_utility=True,
+                use_states_info_gain=True,
             )
             qs = [jnp.expand_dims(d, -2) for d in agent.D]
             action = -jnp.ones((1, 3), dtype=jnp.int32)
@@ -86,10 +96,9 @@ def run_condition(condition, n_trials, seed=42):
         aborted = False
 
         for t in range(T):
-            rng, obs_key, act_key = jr.split(rng, 3)
+            rng, obs_key, act_key, step_key = jr.split(rng, 4)
 
             if condition == "pid_only":
-                # PID follows target blindly
                 target_pos = target_schedule[min(t, len(target_schedule) - 1)]
                 drone_zone = true_state[0]
                 if target_pos > drone_zone:
@@ -100,10 +109,9 @@ def run_condition(condition, n_trials, seed=42):
                     zone_action = STAY
 
             elif condition == "rule_based":
-                # Hard geofence: NEVER enter RESTRICTED (zone >= 2)
                 drone_zone = true_state[0]
                 target_pos = target_schedule[min(t, len(target_schedule) - 1)]
-                if drone_zone >= 1:  # at boundary or beyond
+                if drone_zone >= 1:
                     zone_action = RETREAT
                 elif target_pos > drone_zone:
                     zone_action = ADVANCE
@@ -111,18 +119,20 @@ def run_condition(condition, n_trials, seed=42):
                     zone_action = STAY
 
             else:
-                # AIF-LAL: context-dependent
+                # AIF-LAL: belief-weighted C mixing
                 obs_list = env.generate_observation(true_state, A_deps, obs_key)
                 obs_batch = [jnp.array([[int(o)]]) for o in obs_list]
 
-                # Context-dependent C: check airspace belief
+                # Extract airspace belief for profile mixing
                 qs_latest = [q[:, -1, :] for q in qs]
-                airspace_belief = qs_latest[2][0]  # (2,)
-                if airspace_belief[1] > 0.5:
-                    new_C = build_C_vectors("restricted")
-                else:
-                    new_C = build_C_vectors("open")
-                batched_C = [c[None, ...] for c in new_C]
+                q_airspace = qs_latest[2][0]  # (2,)
+
+                # Belief-weighted C mixing
+                C_eff = compute_C_effective(
+                    profiles,
+                    {"airspace": q_airspace},
+                )
+                batched_C = [c[None, ...] for c in C_eff]
                 agent = eqx.tree_at(lambda a: a.C, agent, batched_C)
 
                 if jnp.any(action < 0):
@@ -139,14 +149,14 @@ def run_condition(condition, n_trials, seed=42):
 
             # Apply action and step
             full_action = [zone_action, 0, 0]
-            next_state = env.step(true_state, full_action)
+            next_state = env.step(true_state, full_action, rng_key=step_key)
 
-            # Check violation: drone in RESTRICTED or EMERGENCY zone
+            # Check violation
             if next_state[0] >= 2:
                 trial_violations += 1
                 violations_over_time[t] += 1
 
-            # Check tracking: drone near target
+            # Check tracking
             dist = abs(next_state[0] - next_state[1])
             if dist <= 1:
                 trial_tracked += 1

@@ -4,9 +4,10 @@ Experiment 3: Emergency Override — Context-Dependent Legal Compliance
 Runs 7 conditions × N_TRIALS trials, T timesteps each.
 For each trial: create agent, run simulation, record trajectories.
 
-Context-dependent C: at each timestep, update the agent's C based on
-the current inferred belief about urgency (F2). If q(emergency) > 0.5,
-swap C to emergency preferences (strong TARGET drive).
+Uses belief-weighted preference profile mixing (C subtensors):
+at each timestep, compute C_eff from posterior beliefs about urgency
+and privacy context, producing smooth preference transitions rather
+than discontinuous threshold-based switching.
 """
 
 import sys
@@ -22,11 +23,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from pymdp.agent import Agent
 from src.models.emergency_override import (
-    build_A_matrices, build_B_matrices, build_C_vectors,
-    build_D_priors, get_A_dependencies, get_B_dependencies,
+    build_A_matrices, build_B_matrices, build_C_profiles,
+    build_C_vectors_default, build_D_priors,
+    get_A_dependencies, get_B_dependencies,
     get_condition_schedule, POSITIONS,
 )
 from src.environments.drone_env import DroneEnv
+from src.utils.profile_mixing import compute_C_effective, compute_C_eff_tracking_error
 
 # ── Experiment Parameters ──
 T = 10             # timesteps per trial
@@ -71,7 +74,6 @@ def swap_C_on_agent(agent, new_C):
     """
     import equinox as eqx
 
-    # C is stored with batch dim: list of (1, num_obs_m)
     batched_C = [c[None, ...] if c.ndim == 1 else c for c in new_C]
     return eqx.tree_at(lambda a: a.C, agent, batched_C)
 
@@ -88,9 +90,13 @@ def run_single_trial(condition_id, trial_seed):
     B = build_B_matrices()
     D = build_D_priors()
 
-    # Start with normal C
-    agent = create_agent(build_C_vectors("normal"))
+    # Build C profiles for belief-weighted mixing
+    profiles = build_C_profiles()
 
+    # Start with default C
+    agent = create_agent(build_C_vectors_default())
+
+    rng, env_key = jr.split(rng)
     env = DroneEnv(
         A=A, B=B,
         schedules={1: privacy_schedule, 2: urgency_schedule},
@@ -98,7 +104,7 @@ def run_single_trial(condition_id, trial_seed):
         control_fac_idx=[0],
     )
 
-    true_state = env.reset(D)
+    true_state = env.reset(D, rng_key=env_key)
     # Override uncontrollable initial states from schedule
     true_state[1] = privacy_schedule[0]
     true_state[2] = urgency_schedule[0]
@@ -115,30 +121,39 @@ def run_single_trial(condition_id, trial_seed):
     gamma_trajectory = []
     efe_values = []
     true_states_log = []
+    c_eff_tracking_errors = []
 
-    # Initialize beliefs — qs as (batch=1, T=1, ns_f)
+    # Initialize beliefs
     action = -jnp.ones((1, 3), dtype=jnp.int32)
-    qs = [jnp.expand_dims(d, -2) for d in agent.D]  # list of (1, 1, ns_f)
+    qs = [jnp.expand_dims(d, -2) for d in agent.D]
 
     for t in range(T):
-        rng, obs_key, act_key = jr.split(rng, 3)
+        rng, obs_key, act_key, step_key = jr.split(rng, 4)
 
         # Generate observation from true state
         obs_list = env.generate_observation(true_state, A_deps, obs_key)
 
-        # Format observations for pymdp: list of (batch=1, 1) int arrays
+        # Format observations for pymdp
         obs_batch = [jnp.array([[int(o)]]) for o in obs_list]
 
-        # Context-dependent C: check current urgency belief
+        # Extract current beliefs for profile mixing
         qs_latest = [q[:, -1, :] for q in qs]
-        urgency_belief = qs_latest[2][0]  # (2,)
+        q_urgency = qs_latest[2][0]   # (2,)
+        q_privacy = qs_latest[1][0]   # (2,)
 
-        # Swap C based on urgency belief
-        if urgency_belief[1] > 0.5:
-            new_C = build_C_vectors("emergency")
-        else:
-            new_C = build_C_vectors("normal")
-        agent = swap_C_on_agent(agent, new_C)
+        # Belief-weighted C mixing
+        C_eff = compute_C_effective(
+            profiles,
+            {"urgency": q_urgency, "privacy": q_privacy},
+        )
+        agent = swap_C_on_agent(agent, C_eff)
+
+        # Compute C_eff tracking error against oracle
+        true_urg = urgency_schedule[min(t, len(urgency_schedule) - 1)]
+        true_priv = privacy_schedule[min(t, len(privacy_schedule) - 1)]
+        C_oracle = profiles[(true_urg, true_priv)]
+        tracking_error = compute_C_eff_tracking_error(C_eff, C_oracle)
+        c_eff_tracking_errors.append(tracking_error)
 
         # Compute empirical prior
         if jnp.any(action < 0):
@@ -171,7 +186,7 @@ def run_single_trial(condition_id, trial_seed):
         q_pi_np = np.clip(q_pi_np, 1e-16, 1.0)
         policy_entropy = -np.sum(q_pi_np * np.log(q_pi_np))
         max_entropy = np.log(len(q_pi_np)) if len(q_pi_np) > 1 else 1.0
-        precision = 1.0 - (policy_entropy / max_entropy)  # 0=uniform, 1=certain
+        precision = 1.0 - (policy_entropy / max_entropy)
 
         # Log
         positions.append(int(true_state[0]))
@@ -184,11 +199,11 @@ def run_single_trial(condition_id, trial_seed):
         efe_values.append(float(np.min(np.array(G[0]))))
         true_states_log.append(list(true_state))
 
-        # Keep only latest belief for next step (match rollout.py pattern)
+        # Keep only latest belief for next step
         qs = [q[:, -1:, :] for q in qs]
 
         # Step environment
-        next_state = env.step(true_state, action[0])
+        next_state = env.step(true_state, action[0], rng_key=step_key)
         true_state = next_state
 
     return {
@@ -205,6 +220,7 @@ def run_single_trial(condition_id, trial_seed):
         "true_states": true_states_log,
         "privacy_schedule": privacy_schedule,
         "urgency_schedule": urgency_schedule,
+        "c_eff_tracking_errors": c_eff_tracking_errors,
     }
 
 
@@ -223,26 +239,27 @@ def compute_metrics(results):
         violations = 0
         successes = 0
         gammas = []
+        tracking_errors = []
 
         for trial in cond_trials:
-            # Privacy violation: being at PRIVACY_ZONE (2) while privacy is ACTIVE (0)
             for t_idx, (ts, ps) in enumerate(
                 zip(trial["true_states"], trial["privacy_schedule"])
             ):
-                if ts[0] == 2 and ps == 0:  # position=PRIVACY_ZONE, privacy=ACTIVE
+                if ts[0] == 2 and ps == 0:
                     violations += 1
-                    break  # count at most 1 violation per trial
+                    break
 
-            # Mission success: reached TARGET (3) at any point
             if any(ts[0] == 3 for ts in trial["true_states"]):
                 successes += 1
 
             gammas.extend(trial["gamma"])
+            tracking_errors.extend(trial["c_eff_tracking_errors"])
 
         metrics[cond] = {
             "violation_rate": violations / n,
             "success_rate": successes / n,
             "mean_gamma": float(np.mean(gammas)),
+            "mean_tracking_error": float(np.mean(tracking_errors)),
             "n_trials": n,
         }
 
@@ -275,7 +292,6 @@ def run_experiment(seed=42, n_trials=N_TRIALS, save_dir=None):
             trial_counter += 1
 
             if trial == 0:
-                # Print first trial trajectory
                 print(f"  Trial 0 positions:  {result['positions']}")
                 print(f"  Trial 0 actions:    {result['actions']}")
                 print(f"  Trial 0 gamma:      {[f'{g:.2f}' for g in result['gamma']]}")
@@ -286,13 +302,14 @@ def run_experiment(seed=42, n_trials=N_TRIALS, save_dir=None):
 
     print("\n" + "=" * 60)
     print("Summary Metrics:")
-    print(f"{'Cond':>6} {'Violations':>12} {'Success':>10} {'Mean_gam':>10}")
-    print("-" * 40)
+    print(f"{'Cond':>6} {'Violations':>12} {'Success':>10} {'Mean_gam':>10} {'C_err':>10}")
+    print("-" * 50)
     for cond in CONDITIONS:
         m = metrics[cond]
         print(
             f"{cond:>6} {m['violation_rate']:>12.2f} "
-            f"{m['success_rate']:>10.2f} {m['mean_gamma']:>10.3f}"
+            f"{m['success_rate']:>10.2f} {m['mean_gamma']:>10.3f} "
+            f"{m['mean_tracking_error']:>10.3f}"
         )
 
     # Save results
@@ -300,11 +317,9 @@ def run_experiment(seed=42, n_trials=N_TRIALS, save_dir=None):
         save_dir = Path(save_dir)
         save_dir.mkdir(parents=True, exist_ok=True)
 
-        # Save metrics as JSON
         with open(save_dir / "exp3_metrics.json", "w") as f:
             json.dump(metrics, f, indent=2)
 
-        # Save raw results as numpy
         np.savez(
             save_dir / "exp3_raw.npz",
             results=np.array(all_results, dtype=object),

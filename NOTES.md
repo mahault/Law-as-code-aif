@@ -69,40 +69,65 @@ The initial `--quick` run showed C1 (Normal/Active — agent should stay) with ~
 | C6 | Emergency, A->S@t7 -> Cross | 96.7% | 96.7% |
 | C7 | N->E@t4, A->S@t7 -> Override | 3.3% | 93.3% |
 
-**Key insight: C_eff timing lag is PROTECTIVE.** Computing C_eff from pre-observation beliefs (not post) provides temporal smoothing that dampens the effect of single noisy observations. Moving C_eff after inference would make the agent MORE reactive to noise, not less.
+**Key insight: C_eff timing lag is PROTECTIVE.** Computing C_eff from pre-observation beliefs (not post) provides temporal smoothing that dampens the effect of single noisy observations. Moving C_eff after inference would make the agent MORE reactive to noise.
 
-**All downstream experiments** (exp1-3, ablation, baselines, sensitivity, noise, learning) call `build_B_matrices()` and `build_D_priors()` without overrides, so they pick up the new defaults automatically.
+**All downstream experiments** call `build_B_matrices()` and `build_D_priors()` without overrides, so they pick up the new defaults automatically.
 
-**Diagnostic files created (temporary):**
-- `src/experiments/diagnose_c1.py` — step-by-step trace of single trials
-- `src/experiments/diagnose_c1_stats.py` — configuration sweep across 4 B/D combos
-- `src/experiments/diagnose_final.py` — final 30-trial x 7-condition validation
+## TODO — What Still Needs To Be Done
 
-## Where We Are Now
+### 1. Re-run --quick validation with fixed model
+- The B matrix and D prior fixes are applied but the full experiment suite has NOT been re-run
+- Run: `python src/experiments/run_all.py --quick`
+- Verify all 9 experiments complete without errors and results improve
+- A --quick run was started but interrupted; needs to be run again
 
-### Immediate next step: Re-run --quick validation with fixed model
+### 2. Full production run (no --quick)
+- Run `python src/experiments/run_all.py` with full trial counts (50-100 per cell)
+- **Problem: GPU not available on native Windows**
+  - Machine has NVIDIA RTX A4000 Laptop GPU (8 GB, CUDA 13.0 driver)
+  - JAX CUDA wheels only exist for Linux, not Windows
+  - Options: (a) run on CPU (~83 hrs / ~3.5 days), (b) set up WSL2 for GPU, (c) reduce sensitivity sweep trials
+- Sensitivity sweep alone is ~73 hours on CPU (35 cells x 2 conditions x 50 trials)
 
-The B matrix and D prior fixes are applied. Need to re-run the full experiment suite to verify all 9 experiments still work and produce improved results.
+### 3. Evaluate experiment results critically
+After running, check:
+- Does ablation now show meaningful differentiation between FULL/PRAGMATIC/EPISTEMIC/RANDOM?
+- Do baselines differentiate AIF from rule-based agents?
+- Is sensitivity sweep less fragile with new B/D parameters?
+- Does noise experiment show graceful degradation instead of step function?
+- Is mean_gamma still constant (was a problem in previous run)?
 
-### Then: Full production run
+### 4. Copy figures fig6-fig10 to paper/figures/
+- Currently run_all.py only generates figs to results/ directory
+- fig1-fig5 were manually copied to paper/figures/ previously
+- fig6-fig10 (ablation, baselines, sensitivity, noise, learning) need to be added
 
-**Problem: GPU not available on native Windows.**
-- Machine has NVIDIA RTX A4000 Laptop GPU (8 GB, CUDA 13.0 driver)
-- JAX CUDA wheels (`jax-cuda12-plugin`) only exist for Linux, not Windows
-- Attempted `pip install jax[cuda12]` — pip backtracked to jax 0.4.21 (broken)
-- Reverted to jax 0.4.35 (working CPU-only)
+### 5. Update paper (main.tex)
+- Paper has NOT been updated to reference the new experiments
+- Need to add sections for: ablation, baselines, sensitivity, noise robustness, learning
+- Need to update the emergency override section with the new B/D parameter justification
+- Need to discuss the C subtensor / belief-weighted mixing approach properly
 
-**Options:**
-1. Run full suite on CPU (~3.5 days estimated)
-2. Set up project in WSL2 for JAX CUDA access
-3. Reduce sensitivity sweep trials (e.g., 20 instead of 50)
+### 6. Clean up diagnostic files
+- `src/experiments/diagnose_c1.py` — step-by-step trace (temporary)
+- `src/experiments/diagnose_c1_stats.py` — config sweep (temporary)
+- `src/experiments/diagnose_final.py` — final validation (temporary)
+- These were investigation tools; decide whether to keep or remove
 
-### JAX version situation
+### 7. Consider C5 success rate
+- C5 (normal urgency, late privacy switch at t=7) only has 10% success rate
+- Agent is conservative — it stays safe when there's no emergency justification
+- This is principled behavior but may need discussion in the paper
+- Could increase T (more timesteps) to give agent time to react after switch
+
+## Technical Notes
+
+### JAX version
 - Installed: jax==0.4.35, jaxlib==0.4.35 (CPU-only, working)
 - Dependency warnings exist (chex wants >=0.7.0, equinox wants >=0.4.38) but code runs fine
 - Do NOT upgrade jax without testing — pymdp compatibility is fragile
 
-## Key Files
+### Key Files
 
 | File | Role |
 |------|------|
@@ -114,10 +139,7 @@ The B matrix and D prior fixes are applied. Need to re-run the full experiment s
 | `results/` | All JSON results + PDF figures |
 | `paper/` | LaTeX paper + figures for Overleaf |
 
-## Known Issues
-
+### Known Issues
 1. **Sensitivity sweep is the bottleneck** — 35 cells with 50 trials each takes ~73 hrs on CPU
-2. **Paper figures (fig6-fig10) not copied to paper/figures/** — only fig1-fig5 are copied by run_all.py
-3. **Paper (main.tex) not yet updated** to reference the new experiments/figures
-4. **C1 residual violations (~17%)** — inherent to stochastic model with 12.5% observation noise; represents irreducible error from simultaneous wrong observations on multiple modalities. This is actually realistic and defensible in the paper.
-5. **C5 low success rate (10%)** — agent is conservative when privacy switches late with no emergency justification. Principled behavior but may need discussion in paper.
+2. **C1 residual violations (~17%)** — inherent to stochastic model with 12.5% observation noise; represents irreducible error from simultaneous wrong observations on multiple modalities. Realistic and defensible.
+3. **C5 low success rate (10%)** — conservative agent behavior with no emergency justification

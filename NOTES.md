@@ -1,8 +1,37 @@
-# Project Status Notes — 2026-05-19
+# Project Status Notes — 2026-05-20
 
 ## What This Project Is
 
 Active Inference (AIF) framework for encoding legal obligations as prior preference profiles in autonomous drone agents. Three regulatory domains: GDPR data minimization, EASA geofencing, emergency override. Uses pymdp (JAX-based) for Active Inference agents.
+
+## Current Plan (2026-05-20)
+
+### What we're doing right now
+
+**Run the full experiment pipeline on the EC2 instance (aif-meta cogames) with GPU.**
+
+The code is ready, the model fixes are applied, but experiments have NOT been re-run since the fixes. On the local Windows machine, JAX can only run on CPU (JAX CUDA wheels are Linux-only), and even the `--quick` validation takes ~5 hours due to JIT compilation. The EC2 instance with GPU should be dramatically faster.
+
+### Steps to execute on EC2
+
+1. Clone/pull the repo on the EC2 instance
+2. Install dependencies: `pip install -e .` or `pip install jax[cuda12] pymdp equinox matplotlib`
+3. Verify GPU is detected: `python -c "import jax; print(jax.devices())"`
+4. Run `--quick` validation first: `python src/experiments/run_all.py --quick`
+5. If --quick passes, run full production: `python src/experiments/run_all.py`
+6. Pull results back (JSON + PDF figures in `results/`)
+
+### Why we're doing this
+
+The previous `--quick` run (before model fixes) showed serious problems:
+- C1 violation rate ~67% (should be low)
+- Ablation results statistically meaningless
+- Sensitivity sweep showed fragile mechanism
+- Baselines didn't differentiate AIF
+- Noise experiment was a step function
+- mean_gamma was constant
+
+We diagnosed and fixed the root causes (see "Investigation" section below). Now we need to re-run everything to confirm the fixes work across all 9 experiments and produce publishable results.
 
 ## What Was Done (Complete)
 
@@ -42,22 +71,19 @@ Replaced hard if-then threshold C-switching with principled belief-weighted pref
 
 ### Investigation: C1 Violation Root Cause (2026-05-19)
 
-The initial `--quick` run showed C1 (Normal/Active — agent should stay) with ~67% violation rate. Deep investigation found two principled root causes:
+The initial `--quick` run showed C1 (Normal/Active — agent should stay) with ~67% violation rate. Deep investigation found two principled root causes and applied fixes:
 
 **Root cause 1: B1 transition rate too high (was a=0.125)**
 - Privacy zones are stable legal designations, not volatile states
 - A 12.5% flip probability per timestep made the agent's beliefs volatile
-- A single noisy observation could flip privacy belief from [0.97, 0.03] to [0.46, 0.54]
 - **Fix:** `build_B_matrices(a_priv=0.01, a_urg=0.02)` — models privacy as stable
 
 **Root cause 2: Uninformative D1 prior (was [0.5, 0.5])**
 - At t=0, the agent starts at PATROL where privacy observations are ambiguous
-- At t=1, the agent reaches APPROACH and gets its FIRST informative observation
-- With a flat prior, this single observation dominates beliefs entirely
-- If that observation is wrong (12.5% chance per modality), beliefs flip catastrophically
+- With a flat prior, the first informative observation dominates beliefs entirely
 - **Fix:** `build_D_priors()` with D1=[0.75, 0.25] — modest prior favoring active privacy
 
-**Validation results (30 trials x 7 conditions):**
+**Validation results (30 trials x 7 conditions, via diagnose_final.py):**
 
 | Condition | Description | Violations | Success |
 |-----------|-------------|------------|---------|
@@ -69,63 +95,27 @@ The initial `--quick` run showed C1 (Normal/Active — agent should stay) with ~
 | C6 | Emergency, A->S@t7 -> Cross | 96.7% | 96.7% |
 | C7 | N->E@t4, A->S@t7 -> Override | 3.3% | 93.3% |
 
-**Key insight: C_eff timing lag is PROTECTIVE.** Computing C_eff from pre-observation beliefs (not post) provides temporal smoothing that dampens the effect of single noisy observations. Moving C_eff after inference would make the agent MORE reactive to noise.
+**Key insight: C_eff timing lag is PROTECTIVE.** Computing C_eff from pre-observation beliefs provides temporal smoothing that dampens noise. Do NOT move C_eff after inference.
 
 **All downstream experiments** call `build_B_matrices()` and `build_D_priors()` without overrides, so they pick up the new defaults automatically.
 
-## TODO — What Still Needs To Be Done
+## After the Run — Remaining TODO
 
-### 1. Re-run --quick validation with fixed model
-- The B matrix and D prior fixes are applied but the full experiment suite has NOT been re-run
-- Run: `python src/experiments/run_all.py --quick`
-- Verify all 9 experiments complete without errors and results improve
-- A --quick run was started but interrupted; needs to be run again
-
-### 2. Full production run (no --quick)
-- Run `python src/experiments/run_all.py` with full trial counts (50-100 per cell)
-- **Problem: GPU not available on native Windows**
-  - Machine has NVIDIA RTX A4000 Laptop GPU (8 GB, CUDA 13.0 driver)
-  - JAX CUDA wheels only exist for Linux, not Windows
-  - Options: (a) run on CPU (~83 hrs / ~3.5 days), (b) set up WSL2 for GPU, (c) reduce sensitivity sweep trials
-- Sensitivity sweep alone is ~73 hours on CPU (35 cells x 2 conditions x 50 trials)
-
-### 3. Evaluate experiment results critically
-After running, check:
-- Does ablation now show meaningful differentiation between FULL/PRAGMATIC/EPISTEMIC/RANDOM?
-- Do baselines differentiate AIF from rule-based agents?
-- Is sensitivity sweep less fragile with new B/D parameters?
-- Does noise experiment show graceful degradation instead of step function?
-- Is mean_gamma still constant (was a problem in previous run)?
-
-### 4. Copy figures fig6-fig10 to paper/figures/
-- Currently run_all.py only generates figs to results/ directory
-- fig1-fig5 were manually copied to paper/figures/ previously
-- fig6-fig10 (ablation, baselines, sensitivity, noise, learning) need to be added
-
-### 5. Update paper (main.tex)
-- Paper has NOT been updated to reference the new experiments
-- Need to add sections for: ablation, baselines, sensitivity, noise robustness, learning
-- Need to update the emergency override section with the new B/D parameter justification
-- Need to discuss the C subtensor / belief-weighted mixing approach properly
-
-### 6. Clean up diagnostic files
-- `src/experiments/diagnose_c1.py` — step-by-step trace (temporary)
-- `src/experiments/diagnose_c1_stats.py` — config sweep (temporary)
-- `src/experiments/diagnose_final.py` — final validation (temporary)
-- These were investigation tools; decide whether to keep or remove
-
-### 7. Consider C5 success rate
-- C5 (normal urgency, late privacy switch at t=7) only has 10% success rate
-- Agent is conservative — it stays safe when there's no emergency justification
-- This is principled behavior but may need discussion in the paper
-- Could increase T (more timesteps) to give agent time to react after switch
+1. **Evaluate results critically** — check ablation differentiation, baseline separation, sensitivity robustness, noise graceful degradation, mean_gamma
+2. **Copy figures fig6-fig10 to paper/figures/** — run_all.py outputs to results/, only fig1-5 were previously copied to paper/figures/
+3. **Update paper (main.tex)** — add sections for new experiments, update B/D parameter justification, discuss C subtensor approach
+4. **Clean up diagnostic files** — `diagnose_c1.py`, `diagnose_c1_stats.py`, `diagnose_final.py` are temporary investigation tools
+5. **Address C5 success rate** — 10% success is principled (conservative safety) but needs paper discussion
 
 ## Technical Notes
 
-### JAX version
+### JAX version (local Windows)
 - Installed: jax==0.4.35, jaxlib==0.4.35 (CPU-only, working)
-- Dependency warnings exist (chex wants >=0.7.0, equinox wants >=0.4.38) but code runs fine
 - Do NOT upgrade jax without testing — pymdp compatibility is fragile
+
+### JAX on EC2
+- Install with CUDA: `pip install jax[cuda12]`
+- Verify: `python -c "import jax; print(jax.devices())"` should show GPU
 
 ### Key Files
 
@@ -140,6 +130,6 @@ After running, check:
 | `paper/` | LaTeX paper + figures for Overleaf |
 
 ### Known Issues
-1. **Sensitivity sweep is the bottleneck** — 35 cells with 50 trials each takes ~73 hrs on CPU
-2. **C1 residual violations (~17%)** — inherent to stochastic model with 12.5% observation noise; represents irreducible error from simultaneous wrong observations on multiple modalities. Realistic and defensible.
+1. **Sensitivity sweep is the bottleneck** — 35 cells x 50 trials; should be much faster on GPU
+2. **C1 residual violations (~17%)** — inherent to stochastic model with 12.5% observation noise; irreducible error, realistic and defensible
 3. **C5 low success rate (10%)** — conservative agent behavior with no emergency justification

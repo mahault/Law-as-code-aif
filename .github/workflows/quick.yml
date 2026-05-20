@@ -24,12 +24,13 @@ jobs:
       - name: Install dependencies (pin jax to known-good version)
         run: |
           python -m pip install --upgrade pip
-          pip install jax==0.4.35 jaxlib==0.4.35
-          pip install -r requirements.txt
+          printf 'jax==0.4.35\njaxlib==0.4.35\n' > /tmp/constraints.txt
+          pip install -c /tmp/constraints.txt -r requirements.txt
 
       - name: Show environment
         run: |
-          python -c "import jax, pymdp, numpy; print('jax', jax.__version__); print('pymdp', pymdp.__version__); print('numpy', numpy.__version__)"
+          python -c "import jax, numpy; print('jax', jax.__version__); print('numpy', numpy.__version__)"
+          python -c "import pymdp; print('pymdp imported from', pymdp.__file__)"
 
       - name: Run --quick suite
         run: python src/experiments/run_all.py --quick

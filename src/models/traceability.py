@@ -127,7 +127,7 @@ def run_benchmark(n_cycles=1000):
     for w in range(5):
         rng, key = jr.split(rng)
         obs = [jnp.array([[0]]), jnp.array([[0]]), jnp.array([[0]]), jnp.array([[0]])]
-        emp_prior, qs = agent.update_empirical_prior(action, qs)
+        emp_prior = agent.update_empirical_prior(action, qs)
         qs = agent.infer_states(obs, emp_prior)
         q_pi, G = agent.infer_policies(qs)
         action = agent.sample_action(q_pi, rng_key=jr.split(key, 1))
@@ -161,7 +161,7 @@ def run_benchmark(n_cycles=1000):
 
         t0 = time.perf_counter()
 
-        emp_prior, qs = agent.update_empirical_prior(action, qs)
+        emp_prior = agent.update_empirical_prior(action, qs)
         qs = agent.infer_states(obs_idx, emp_prior)
         q_pi, G = agent.infer_policies(qs)
         action = agent.sample_action(q_pi, rng_key=jr.split(key, 1))

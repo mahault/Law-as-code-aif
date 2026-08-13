@@ -77,7 +77,7 @@ def run_trial(condition_id, seed, B_override=None, D_override=None):
         if jnp.any(action < 0):
             empirical_prior = agent.D
         else:
-            empirical_prior, qs = agent.update_empirical_prior(action, qs)
+            empirical_prior = agent.update_empirical_prior(action, qs)
 
         qs = agent.infer_states(observations=obs_batch, empirical_prior=empirical_prior)
         q_pi, G = agent.infer_policies(qs)

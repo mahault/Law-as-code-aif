@@ -31,7 +31,7 @@ from src.utils.profile_mixing import compute_C_effective
 from src.utils.stats import bootstrap_ci
 
 T_TRAIN = 200
-T_TEST = 10
+T_TEST = 15
 N_TRIALS_TEST = 50
 POLICY_LEN = 4
 GAMMA = 16.0
@@ -54,6 +54,22 @@ def build_uniform_A_priors():
     return [a0, a1, a2, a3]
 
 
+def build_hierarchical_A_priors():
+    """Priors for the calibrated-sensor configuration.
+
+    Position (A0) and emergency signal (A2) are pinned to their calibrated
+    values with strong Dirichlet concentration (1e4 x true), so they stay
+    at the hardware-calibrated values while remaining formally learnable.
+    Privacy cue (A1) and complaint (A3) are learned from flat priors.
+    """
+    A_true = build_A_matrices()
+    a0 = 1e4 * jnp.array(A_true[0])
+    a1 = jnp.ones((2, 4, 2)) * 1.0
+    a2 = 1e4 * jnp.array(A_true[2])
+    a3 = jnp.ones((2, 4, 2)) * 1.0
+    return [a0, a1, a2, a3]
+
+
 def build_misspecified_A():
     """Build deliberately misspecified A matrices.
 
@@ -65,7 +81,7 @@ def build_misspecified_A():
     return A
 
 
-def train_agent(seed=42):
+def train_agent(seed=42, pA_builder=build_uniform_A_priors):
     """Train agent by learning A matrices from stochastic experience.
 
     Returns the learned A matrices (as concentration parameters).
@@ -77,7 +93,7 @@ def train_agent(seed=42):
     D = build_D_priors()
     profiles = build_C_profiles()
     A_deps = get_A_dependencies()
-    pA = build_uniform_A_priors()
+    pA = pA_builder()
 
     # Create agent with learning enabled
     agent = Agent(
@@ -143,7 +159,7 @@ def train_agent(seed=42):
         if jnp.any(action < 0):
             empirical_prior = agent.D
         else:
-            empirical_prior, qs = agent.update_empirical_prior(action, qs)
+            empirical_prior = agent.update_empirical_prior(action, qs)
 
         qs = agent.infer_states(obs_batch, empirical_prior)
         q_pi, G = agent.infer_policies(qs)
@@ -152,7 +168,7 @@ def train_agent(seed=42):
         # Learn A matrices via infer_parameters
         agent = agent.infer_parameters(
             beliefs_A=qs,
-            outcomes=obs_batch,
+            observations=obs_batch,
             actions=action,
         )
 
@@ -254,7 +270,7 @@ def run_test_phase(A_matrices, agent_label, n_trials, seed=42):
                 if jnp.any(action < 0):
                     empirical_prior = agent.D
                 else:
-                    empirical_prior, qs = agent.update_empirical_prior(action, qs)
+                    empirical_prior = agent.update_empirical_prior(action, qs)
 
                 qs = agent.infer_states(obs_batch, empirical_prior)
                 q_pi, G = agent.infer_policies(qs)
@@ -290,17 +306,23 @@ def run_experiment(seed=42, n_trials=N_TRIALS_TEST, save_dir=None):
     print("=" * 60)
 
     # Phase 1: Train
-    print("\n--- Training phase ---")
+    print("\n--- Training phase (flat priors) ---")
     learned_A, learning_curve = train_agent(seed=seed)
     print(f"  Training complete. Final L1(A2): {learning_curve[-1]:.4f}")
 
-    # Phase 2: Test with 3 configurations
+    print("\n--- Training phase (hierarchical priors) ---")
+    hier_A, hier_curve = train_agent(
+        seed=seed, pA_builder=build_hierarchical_A_priors)
+    print(f"  Training complete. Final L1(A2): {hier_curve[-1]:.4f}")
+
+    # Phase 2: Test with 4 configurations
     oracle_A = build_A_matrices()
     misspecified_A = build_misspecified_A()
 
     configs = {
         "ORACLE": oracle_A,
         "LEARNED": [jnp.array(a) for a in learned_A],
+        "HIERARCHICAL": [jnp.array(a) for a in hier_A],
         "MISSPECIFIED": misspecified_A,
     }
 
@@ -337,6 +359,7 @@ def run_experiment(seed=42, n_trials=N_TRIALS_TEST, save_dir=None):
         save_dir.mkdir(parents=True, exist_ok=True)
         results_json = {
             "learning_curve": learning_curve,
+            "learning_curve_hierarchical": hier_curve,
         }
         for label in all_results:
             results_json[label] = {}

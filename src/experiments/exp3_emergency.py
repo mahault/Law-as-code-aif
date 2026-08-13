@@ -32,7 +32,7 @@ from src.environments.drone_env import DroneEnv
 from src.utils.profile_mixing import compute_C_effective, compute_C_eff_tracking_error
 
 # ── Experiment Parameters ──
-T = 10             # timesteps per trial
+T = 15             # timesteps per trial (extended from 10: episode must outlive the last context switch by belief lag + traversal time; switches stay at t=4, t=7)
 N_TRIALS = 50      # trials per condition
 POLICY_LEN = 4     # planning horizon (N=4 as in DEM_laws.m)
 GAMMA = 16.0       # policy precision
@@ -159,7 +159,7 @@ def run_single_trial(condition_id, trial_seed):
         if jnp.any(action < 0):
             empirical_prior = agent.D
         else:
-            empirical_prior, qs = agent.update_empirical_prior(action, qs)
+            empirical_prior = agent.update_empirical_prior(action, qs)
 
         # Infer hidden states
         qs = agent.infer_states(

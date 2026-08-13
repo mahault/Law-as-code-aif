@@ -4,3 +4,13 @@ __pycache__/
 .venv/
 *.egg-info/
 .DS_Store
+
+# run artifacts
+results_*/
+overnight_log*.txt
+*_out.txt
+*_err.txt
+diag_*.json
+*.zip
+rerun_log*.txt
+*.disabled

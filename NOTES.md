@@ -133,3 +133,23 @@ The initial `--quick` run showed C1 (Normal/Active — agent should stay) with ~
 1. **Sensitivity sweep is the bottleneck** — 35 cells x 50 trials; should be much faster on GPU
 2. **C1 residual violations (~17%)** — inherent to stochastic model with 12.5% observation noise; irreducible error, realistic and defensible
 3. **C5 low success rate (10%)** — conservative agent behavior with no emergency justification
+
+## Status 2026-08-14 (T=15 adoption + full rerun)
+
+- All experiments rerun end-to-end on the pinned released stack
+  (pymdp 1.0.0, jax 0.11.0, Python 3.14, CPU). Every number in the paper
+  now reproduces from this repo.
+- Horizon extended to T=15 (schedule-derived criterion; switches unchanged).
+  C5 0.08->0.92 success, C7 0.76->1.00. Cost: C1 violations 0.04->0.10.
+- exp1 and exp2 claims REVERSED on the reproducible stack and the paper was
+  rewritten accordingly: exp1 AIF now equals rule-based exactly (always
+  anonymize under the 70% cue); exp2 rewritten around the extended
+  two-scenario emergency-exception experiment.
+- exp_learning gained the HIERARCHICAL config (A0/A2 pinned at 1e4x
+  calibrated, A1/A3 learned). It recovers most but not all compliance;
+  diag_hier.py shows why: one privacy-zone visit in 200 training steps,
+  so the sanction channel stays undiscriminating ("near-oracle" claim
+  softened everywhere).
+- Overleaf holds ~95 tracked changes awaiting review (incl. the reversals).
+  Submission target: Artificial Intelligence and Law (double-blind; needs
+  anonymized manuscript + anonymized code mirror before submission).

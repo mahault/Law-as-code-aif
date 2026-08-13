@@ -86,42 +86,84 @@ def plot_fig1_minimization(results, save_path=None):
     return fig
 
 
-def plot_fig2_geofence(results, save_path=None):
-    """Fig 2: Geofence violations and tracking over time."""
-    conditions = ["pid_only", "rule_based", "aif_lal"]
-    labels = ["PID-only", "Rule-based", "AIF-LAL"]
-    colors = [C_BASE, C_RULE, C_AIF]
-    linestyles = ["-", "--", "-"]
+def plot_fig2_geofence(results, save_path=None, airspace_switch=15,
+                       emergency_onset=20):
+    """Fig 2: Geofence compliance with an emergency exception.
 
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(3.5, 3.8), sharex=True)
+    (a) Where the AIF agent flies in the emergency scenario, against its
+        own belief that an override has been authorised. The boundary
+        zone is occupied exactly while that belief is unresolved.
+    (b) Unjustified incursions per controller and scenario.
+    (c) Tracking continuity per controller and scenario.
+    """
+    ctrls = ["pid_only", "rule_based", "rule_based_emergency", "aif_lal"]
+    labels = ["PID-only", "Rule-based", "Rule + emerg.", "AIF-LAL"]
+    colors = [C_BASE, C_RULE, C_PRIV, C_AIF]
 
-    T = None
-    for cond, label, color, ls in zip(conditions, labels, colors, linestyles):
-        data = [r for r in results if r["condition"] == cond][0]
-        viol = data["violations_over_time"]
-        track = data["tracking_over_time"]
-        T = len(viol)
+    def cell(scenario, controller):
+        hits = [r for r in results
+                if r["scenario"] == scenario and r["controller"] == controller]
+        return hits[0] if hits else None
+
+    fig = plt.figure(figsize=(7.0, 2.6))
+    gs = fig.add_gridspec(1, 3, width_ratios=[1.5, 1.0, 1.0], wspace=0.42)
+    ax_a, ax_b, ax_c = (fig.add_subplot(gs[0, i]) for i in range(3))
+
+    # ── (a) zone occupancy + urgency belief, AIF under the emergency scenario
+    aif = cell("emergency", "aif_lal")
+    if aif:
+        z = np.asarray(aif["zone_over_time"])
+        T = z.shape[0]
         t = np.arange(T)
-        lw = 2.0 if cond == "aif_lal" else 1.2
-        ax1.plot(t, viol, ls=ls, color=color, label=label, lw=lw)
-        ax2.plot(t, track, ls=ls, color=color, label=label, lw=lw)
+        # collapse the two restricted zones: both are inside the geofence
+        stack = np.vstack([z[:, 0], z[:, 1], z[:, 2] + z[:, 3]])
+        ax_a.stackplot(t, stack, colors=[PAL[2], PAL[8 % 8], PAL[3]],
+                       labels=["SAFE", "BOUNDARY", "RESTRICTED"], alpha=0.75)
+        ax_a.set_ylim(0, 1)
+        ax_a.set_xlim(0, T - 1)
+        ax_a.set_ylabel("Zone occupancy")
+        ax_a.set_xlabel("Timestep")
 
-    if T:
-        for ax in (ax1, ax2):
-            ax.axvspan(T * 2 / 3, T, alpha=0.1, color="red", zorder=0)
-        ax1.text(T * 5 / 6, 0.82, "Restricted\nairspace",
-                 fontsize=6, color="red", ha="center", style="italic", alpha=0.7)
+        ax_q = ax_a.twinx()
+        ax_q.plot(t, aif["q_emergency_over_time"], color="k", lw=1.4,
+                  label="q(emergency)")
+        ax_q.set_ylim(0, 1.05)
+        ax_q.set_ylabel("q(emergency)", fontsize=8)
+        ax_q.grid(False)
 
-    ax1.set_ylabel("Violation rate")
-    ax1.set_ylim(-0.02, 1.05)
-    ax1.legend(loc="upper left", framealpha=0.9)
+        for x, txt in ((airspace_switch, "airspace\ncloses"),
+                       (emergency_onset, "override\nauthorised")):
+            ax_a.axvline(x, color="k", ls=":", lw=0.8, alpha=0.7)
+            ax_a.text(x + 0.3, 0.04, txt, fontsize=5.5, style="italic", alpha=0.8)
 
-    ax2.set_ylabel("Tracking continuity")
-    ax2.set_xlabel("Timestep")
-    ax2.set_ylim(-0.02, 1.05)
-    ax2.legend(loc="lower left", framealpha=0.9)
+        h1, l1 = ax_a.get_legend_handles_labels()
+        h2, l2 = ax_q.get_legend_handles_labels()
+        ax_a.legend(h1 + h2, l1 + l2, loc="upper left", framealpha=0.9, ncol=2)
+        ax_a.set_title("(a) AIF-LAL, emergency scenario", fontsize=8)
 
-    plt.tight_layout()
+    # ── (b) and (c) bar comparisons
+    x = np.arange(len(ctrls))
+    w = 0.38
+    for ax, key, ylab, title in (
+        (ax_b, "unjustified_mean", "Unjustified incursions",
+         "(b) Unlawful entries"),
+        (ax_c, "tracking_pct_mean", "Tracking continuity",
+         "(c) Mission continuity"),
+    ):
+        for i, (scen, hatch) in enumerate((("normal", None), ("emergency", "//"))):
+            vals = [(cell(scen, c) or {}).get(key, 0.0) for c in ctrls]
+            ax.bar(x + (i - 0.5) * w, vals, w, color=colors, alpha=0.9,
+                   hatch=hatch, edgecolor="white", linewidth=0.5)
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels, rotation=30, ha="right", fontsize=6.5)
+        ax.set_ylabel(ylab, fontsize=8)
+        ax.set_title(title, fontsize=8)
+
+    ax_b.legend(handles=[Patch(facecolor="gray", label="normal"),
+                         Patch(facecolor="gray", hatch="//", label="emergency")],
+                loc="upper right", framealpha=0.9)
+    ax_c.set_ylim(0, 1.05)
+
     if save_path:
         fig.savefig(save_path)
         print(f"  Fig 2 saved to {save_path}")
@@ -561,30 +603,32 @@ def plot_fig_learning(learning_results, learning_curve, save_path=None):
     ax1.set_ylabel("L1(true A, learned A)")
     ax1.set_title("(a) A-matrix learning curve", fontsize=8)
 
-    # (b) Test performance
-    configs = ["ORACLE", "LEARNED", "MISSPECIFIED"]
-    colors_bar = [C_PRIV, C_AIF, C_EMRG]
+    # (b) Compliance by A-matrix source (violation rate is the informative
+    # metric here: naive learning shows up as violations, not lost success)
+    configs = ["ORACLE", "LEARNED", "HIERARCHICAL", "MISSPECIFIED"]
+    display = {"LEARNED": "FULL_LEARN"}
+    colors_bar = [C_PRIV, C_AIF, C_RULE, C_EMRG]
     conditions = [1, 2, 3, 4, 5, 6, 7]
     x = np.arange(len(conditions))
-    width = 0.25
+    width = 0.2
 
     for i, (cfg, color) in enumerate(zip(configs, colors_bar)):
         if cfg in learning_results:
             rates = []
             for cond in conditions:
                 if cond in learning_results[cfg]:
-                    rates.append(learning_results[cfg][cond]["success_rate"][0])
+                    rates.append(learning_results[cfg][cond]["violation_rate"][0])
                 else:
                     rates.append(0)
-            ax2.bar(x + i * width, rates, width, label=cfg, color=color,
-                    edgecolor="white", linewidth=0.5)
+            ax2.bar(x + i * width, rates, width, label=display.get(cfg, cfg),
+                    color=color, edgecolor="white", linewidth=0.5)
 
-    ax2.set_ylabel("Success rate")
-    ax2.set_xticks(x + width)
+    ax2.set_ylabel("Violation rate")
+    ax2.set_xticks(x + 1.5 * width)
     ax2.set_xticklabels([f"C{c}" for c in conditions])
     ax2.set_ylim(0, 1.1)
     ax2.legend(fontsize=6)
-    ax2.set_title("(b) Test performance by A-matrix source", fontsize=8)
+    ax2.set_title("(b) Violation rate by A-matrix source", fontsize=8)
 
     plt.tight_layout()
     if save_path:

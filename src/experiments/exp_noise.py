@@ -33,7 +33,7 @@ from src.baselines.agents import HPMNoisyAgent, BayesRulesAgent
 from src.utils.profile_mixing import compute_C_effective
 from src.utils.stats import bootstrap_ci
 
-T = 10
+T = 15
 N_TRIALS = 100
 POLICY_LEN = 4
 GAMMA = 16.0
@@ -116,7 +116,7 @@ def run_single_trial(agent_type, condition_id, noise_level, trial_seed):
             if jnp.any(action < 0):
                 empirical_prior = agent.D
             else:
-                empirical_prior, qs = agent.update_empirical_prior(action, qs)
+                empirical_prior = agent.update_empirical_prior(action, qs)
 
             qs = agent.infer_states(obs_batch, empirical_prior)
             q_pi, G = agent.infer_policies(qs)

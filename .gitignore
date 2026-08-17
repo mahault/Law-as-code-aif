@@ -14,3 +14,4 @@ diag_*.json
 *.zip
 rerun_log*.txt
 *.disabled
+submission/
